@@ -556,21 +556,24 @@ def generate_balanced_week(recipes_dict, existing_week=None):
     return week
 
 def fetch_ingredients_from_url(url: str) -> list[str]:
-    """Extracts and cleans recipe ingredients from Schema.org JSON-LD metadata."""
+    """Extracts and cleans recipe ingredients from Schema.org JSON-LD and HTML fallbacks."""
     if not url or not url.startswith(("http://", "https://")):
         return []
 
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            )
-        },
-    )
-    with urllib.request.urlopen(req, timeout=8) as resp:
-        raw_html = resp.read().decode("utf-8", errors="ignore")
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                )
+            },
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            raw_html = resp.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return []
 
     scripts = re.findall(
         r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
@@ -578,33 +581,42 @@ def fetch_ingredients_from_url(url: str) -> list[str]:
         flags=re.DOTALL | re.IGNORECASE,
     )
 
-    def find_recipe_node(node):
+    def find_recipe_nodes(node, results=None):
+        if results is None:
+            results = []
         if isinstance(node, dict):
             node_type = node.get("@type", "")
             types = node_type if isinstance(node_type, list) else [node_type]
             if any(str(t).lower() == "recipe" for t in types):
-                return node
+                results.append(node)
             for val in node.values():
-                found = find_recipe_node(val)
-                if found:
-                    return found
+                find_recipe_nodes(val, results)
         elif isinstance(node, list):
             for item in node:
-                found = find_recipe_node(item)
-                if found:
-                    return found
-        return None
+                find_recipe_nodes(item, results)
+        return results
 
     raw_ingredients = []
     for block in scripts:
         try:
             data = json.loads(block.strip())
-            recipe_node = find_recipe_node(data)
-            if recipe_node and "recipeIngredient" in recipe_node:
-                raw_ingredients = recipe_node["recipeIngredient"]
-                break
+            recipe_nodes = find_recipe_nodes(data)
+            for node in recipe_nodes:
+                if "recipeIngredient" in node:
+                    ing_list = node["recipeIngredient"]
+                    if isinstance(ing_list, list):
+                        raw_ingredients.extend(ing_list)
+                    elif isinstance(ing_list, str):
+                        raw_ingredients.append(ing_list)
         except Exception:
             continue
+
+    if len(raw_ingredients) < 3:
+        li_matches = re.findall(r'<li[^>]*>(.*?)</li>', raw_html, flags=re.DOTALL | re.IGNORECASE)
+        for li in li_matches:
+            clean_li = re.sub(r'<[^>]+>', '', li).strip()
+            if len(clean_li) > 2 and len(clean_li.split()) < 10:
+                raw_ingredients.append(clean_li)
 
     cleaned = []
     for item in raw_ingredients:
@@ -612,7 +624,7 @@ def fetch_ingredients_from_url(url: str) -> list[str]:
         text = re.sub(r"\([^)]*\)", "", text)
         text = text.split(",")[0]
         text = LEADING_UNITS_RE.sub("", text).strip(" -–—.")
-        if text and text.lower() not in [c.lower() for c in cleaned]:
+        if text and len(text) > 1 and text.lower() not in [c.lower() for c in cleaned]:
             cleaned.append(text.lower())
 
     return cleaned
@@ -635,7 +647,6 @@ def main(page: ft.Page):
     page.padding = 15
     page.vertical_alignment = ft.MainAxisAlignment.START
 
-    # --- 3-SECOND ASYNC-SAFE VISUAL DEBUG BANNER ---
     debug_banner_text = ft.Text("", color="white", weight=ft.FontWeight.BOLD, size=14)
     debug_banner = ft.Container(
         content=ft.Row([
@@ -1336,7 +1347,6 @@ def main(page: ft.Page):
             card = ft.Card(content=meal_container)
             content_area.controls.append(card)
 
-        # --- BUTTON & ICON KEY CARD AT BOTTOM OF WEEKLY SCHEDULE ---
         def key_item(icon_name, label_text, icon_color="amber_300"):
             return ft.Row([
                 ft.Icon(icon_name, color=icon_color, size=18),
@@ -1946,7 +1956,7 @@ def main(page: ft.Page):
                 aisle_sections = []
                 for aisle, aisle_entries in grouped_to_buy.items():
                     li_tags = "".join(
-                        f"<li><span class='box'>☐</span> {html.escape(format_grocery_entry_label(entry))}</li>"
+                        f"<li><span class='box'>&#9744;</span> {html.escape(format_grocery_entry_label(entry))}</li>"
                         for entry in aisle_entries
                     )
                     aisle_sections.append(
@@ -1987,8 +1997,8 @@ def main(page: ft.Page):
 </style>
 </head>
 <body onload="window.print()">
-  <h1>🍽 Weekly Menu & Grocery List</h1>
-  <div class="meta">Generated on {date_str} • {len(all_to_buy_entries)} item(s) to buy</div>
+  <h1>&#127869; Weekly Menu &amp; Grocery List</h1>
+  <div class="meta">Generated on {date_str} &bull; {len(all_to_buy_entries)} item(s) to buy</div>
   <h2>This Week's Dinner Schedule</h2>
   {menu_html}
   <h2>Shopping List (By Aisle)</h2>
@@ -2330,7 +2340,7 @@ def main(page: ft.Page):
     page.add(debug_banner, content_area)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 10000))
     if hasattr(ft, "run"):
         ft.run(main, view=ft.AppView.WEB_BROWSER, host="0.0.0.0", port=port, assets_dir=ASSETS_DIR)
     else:
