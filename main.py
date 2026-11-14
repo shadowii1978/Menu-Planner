@@ -19,6 +19,43 @@ try:
 except ImportError:
     FPDF_AVAILABLE = False
 
+# --- POSTGRESQL & LOCAL STORAGE SETUP ---
+try:
+    import psycopg2
+    PSYCOPG2_AVAILABLE = True
+except ImportError:
+    PSYCOPG2_AVAILABLE = False
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+def get_db_connection():
+    if not DATABASE_URL or not PSYCOPG2_AVAILABLE:
+        return None
+    try:
+        return psycopg2.connect(DATABASE_URL, sslmode="require")
+    except Exception:
+        return None
+
+def init_db():
+    conn = get_db_connection()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS app_storage (
+                key TEXT PRIMARY KEY,
+                data JSONB
+            );
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"DB Init Error: {e}")
+
+init_db()
+
 # --- WEB STORAGE & PUBLIC ASSETS DIRECTORY SETUP ---
 BASE_DIR = os.path.join(os.getcwd(), "dist")
 os.makedirs(BASE_DIR, exist_ok=True)
@@ -486,6 +523,20 @@ CATEGORY_CONFIG = {
 DEFAULT_CAT_CONFIG = {"color": "#5D00BA", "emoji": "🍽️"}
 
 def load_json_file(filepath, default_val):
+    conn = get_db_connection()
+    if conn and DATABASE_URL:
+        key_name = os.path.basename(filepath)
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT data FROM app_storage WHERE key = %s;", (key_name,))
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+            if row and row[0] is not None:
+                return row[0]
+        except Exception:
+            pass
+    
     if os.path.exists(filepath):
         try:
             with open(filepath, "r", encoding="utf-8-sig") as f:
@@ -495,6 +546,22 @@ def load_json_file(filepath, default_val):
     return default_val
 
 def save_json_file(filepath, data):
+    conn = get_db_connection()
+    if conn and DATABASE_URL:
+        key_name = os.path.basename(filepath)
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO app_storage (key, data) VALUES (%s, %s)
+                ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data;
+            """, (key_name, json.dumps(data)))
+            conn.commit()
+            cur.close()
+            conn.close()
+            return
+        except Exception as e:
+            print(f"DB Save Error: {e}")
+
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4)
 
